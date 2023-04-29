@@ -1,0 +1,11 @@
+p_emissoin=copy.deepcopy(dict_emission)
+    for tag in dict_emission:
+        y=dict_emission[tag]
+        num_types=len(y)
+        #calculation the total number of possible transitions from tag_before
+        num_words=0
+        for i,j in y.items():
+            num_words+=y[i]
+        for word,word_num in y.items():
+            p_emission[tag][word]=(word_num+k)/(num_words+k*(num_types+1))
+        p_emission[tag]['UNKNOWN']=k/(num_words+k*(num_types+1))
