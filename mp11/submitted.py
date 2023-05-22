@@ -337,14 +337,16 @@ class deep_q():
         self.nfirst = nfirst
         
         #these parameters used for epsilon_gready when acting
-        self.epsilon_initial = epsilon
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.05
-        self.epsilon = self.epsilon_initial
+        self.t = 0  # Initial timestep
+        self.updates = 100_000  # Total number of updates
+#         self.epsilon_initial = epsilon
+#         self.epsilon_decay = 0.995
+#         self.epsilon_min = 0.05
+#         self.epsilon = self.epsilon_initial
         
         #learning decay
-        self.alpha_decay_steps = 1000  # decrease the learning rate every 1000 steps
-        self.alpha_decay_rate = 0.95  # decrease the learning rate by 5% every time
+        self.alpha_decay_steps = 10000  # decrease the learning rate every 1000 steps
+        self.alpha_decay_rate = 1  # decrease the learning rate by 5% every time
         
         self.actor_model = self.create_actor_model()
         self.critic_model = self.create_critic_model()
@@ -357,13 +359,15 @@ class deep_q():
         
         self.loss_fn = nn.MSELoss()
         
+        self.update_frequency = 250
         self.target_critic_model = copy.deepcopy(self.critic_model)
         
-        self.batch_size = 64
-        self.replay_buffer = self.ReplayBuffer()
+        self.batch_size = 32
+        self.replay_buffer_capacity = 2**13 #modify this according to updates, also remember to modify the updata_epsilon
+        self.replay_buffer = self.ReplayBuffer(self.replay_buffer_capacity)
         
     class ReplayBuffer():
-        def __init__(self, max_size=1e6):
+        def __init__(self, max_size=1e4):
             self.storage = []
             self.max_size = max_size
             self.ptr = 0
@@ -374,6 +378,7 @@ class deep_q():
                 self.ptr = (self.ptr + 1) % self.max_size
             else:
                 self.storage.append(data)
+
 
         def sample(self, batch_size):
             ind = np.random.randint(0, len(self.storage), size=batch_size)
@@ -387,16 +392,20 @@ class deep_q():
                 newstate.append(np.array(ns, copy=False))
 
             return np.array(state), np.array(action), np.array(reward).reshape(-1,1), np.array(newstate)
-
+        
+        
     def update_target_model(self):
         '''
         Perform soft update (Polyak averaging) on target model parameters. 
         The target model is a separate network which has the same architecture as 
         the original 
         '''
-        tau = 0.005  # a hyperparameter for how much to update the target model at each step
-        for target_param, param in zip(self.target_critic_model.parameters(), self.critic_model.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+#         tau = 0.005  # a hyperparameter for how much to update the target model at each step
+#         for target_param, param in zip(self.target_critic_model.parameters(), self.critic_model.parameters()):
+#             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+        if self.t % self.update_frequency == 0:
+            # Copy the weights from the main network to the target network
+            self.target_critic_model.load_state_dict(self.critic_model.state_dict())
 
     
     def create_actor_model(self):
@@ -409,9 +418,9 @@ class deep_q():
         model (nn.Sequential): A PyTorch model representing the actor network.
         '''
         model = nn.Sequential(
-            nn.Linear(5, 64),
+            nn.Linear(5, 128),
             nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(128, 32),
             nn.ReLU(),
             nn.Linear(32, 3),
             nn.Softmax(dim=1)
@@ -430,24 +439,41 @@ class deep_q():
         model = nn.Sequential(
             nn.Linear(5 + 1, 128),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(128, 1)
         )
         return model
     
     def update_epsilon(self):
-        """
-        This function updates epsilon value based on the decay rate until it reaches the minimum epsilon value.
-        """
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-            
+        '''
+        Update the epsilon (exploration) parameter based on the provided schedule.
+
+        @return epsilon (float): The updated exploration parameter.
+        '''
+
+        start, middle, end = 0, 10_000, self.updates / 2
+        high, medium, low = 1.0, 0.1, 0.01
+
+        if self.t < middle:
+            slope = (medium - high) / (middle - start)
+            epsilon = high + slope * (self.t - start)
+        elif self.t < end:
+            slope = (low - medium) / (end - middle)
+            epsilon = medium + slope * (self.t - middle)
+        else:
+            epsilon = low
+
+#         self.t += 1  # increment the timestep after updating epsilon
+        
+        if self.t % 50 == 0 and self.t!=0:  # Print only every 50 steps
+            print(f"Step: {self.t}, Epsilon updated to: {epsilon}")
+
+        return epsilon
+
     def act(self, state):
         '''
         Decide what action to take in the current state.
-        You are free to determine your own exploration/exploitation policy -- 
-        you don't need to use the epsilon and nfirst provided to you.
 
         @params: 
         state: a list of 5 floats: ball_x, ball_y, ball_vx, ball_vy, paddle_y.
@@ -458,18 +484,28 @@ class deep_q():
         1 if the paddle should move downward
         '''
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        q_values_list = []
 
-        # epsilon-greedy exploration strategy
+        # Get Q-values for each action
+        for action in [-1, 0, 1]:
+            action_tensor = torch.tensor([action]).float().unsqueeze(0)
+            q_value = self.critic_model(torch.cat((state_tensor, action_tensor), dim=1))
+            q_values_list.append(q_value)
+
+        # Stack Q-value tensors; shape becomes: [num_actions]
+        q_values_tensor = torch.stack(q_values_list, dim=-1).squeeze(0)
+
+        # Use a epsilon-greedy strategy for exploration/exploitation
         if np.random.rand() <= self.epsilon:
             action = np.random.choice([-1, 0, 1])
         else:
-            action_probs = self.actor_model(state_tensor)
-            action = torch.argmax(action_probs).item() - 1  # to adjust actions back to -1, 0, 1
+            action = torch.argmax(q_values_tensor).item() - 1  # to adjust actions back to -1, 0, 1
 
         # decay epsilon
         self.update_epsilon()
 
         return action
+
 
     def _learn_from_replay_buffer(self):
         '''
@@ -482,25 +518,43 @@ class deep_q():
 
         state_tensor = torch.tensor(state, dtype=torch.float32)
         newstate_tensor = torch.tensor(newstate, dtype=torch.float32)
-        action_tensor = torch.tensor(action, dtype=torch.float32) + 1  # to adjust actions as 0, 1, 2
+#         print(newstate.shape)
+        action_tensor = torch.tensor(action, dtype=torch.float32) # get rid of the shift
         reward_tensor = torch.tensor(reward, dtype=torch.float32)
         
         action_tensor = action_tensor.unsqueeze(-1)  # add an extra dimension
         q_values = self.critic_model(torch.cat([state_tensor, action_tensor], dim=1))
 
         with torch.no_grad():
-            max_q_values = []
+            q_values_list = []  # list to hold Q-values for each action
 
-            # iterate over all possible actions
+            # For each action...
             for action in [-1, 0, 1]:
-                action_tensor = torch.tensor([action]*self.batch_size).float().unsqueeze(1)
-                q_value = self.target_critic_model(torch.cat((newstate_tensor, action_tensor), dim=1))
-                max_q_values.append(q_value)
+                action_tensor = torch.tensor([action]*self.batch_size).float().unsqueeze(1)  # shape: [batch_size, 1]
 
-            max_q_values = torch.stack(max_q_values, dim=-1)
-            max_q_values, _ = torch.max(max_q_values, dim=-1)
-            #Q_local=R(s) + gamma*max_{a}(Q_target(s,a))
-            target_q_values = reward_tensor + self.gamma * max_q_values.unsqueeze(1)
+                # Get Q-value for each action for all samples in batch (from critic model)
+                q_value = self.critic_model(torch.cat((newstate_tensor, action_tensor), dim=1))  # shape: [batch_size, 1]
+                
+                q_values_list.append(q_value)  # each q_value tensor added has shape: [batch_size, 1]
+            # Stack Q-value tensors; shape becomes: [batch_size, num_actions]
+            q_values_tensor = torch.stack(q_values_list, dim=-1)
+
+            # Get max Q-value and corresponding action for each sample in batch
+            max_q_values, max_actions = torch.max(q_values_tensor, dim=-1)  # shape: [batch_size], [batch_size]
+            
+            # Convert max_actions to be in the format [-1, 0, 1]
+           
+            max_actions = max_actions - 1.  # shape: [batch_size]
+         
+            #max_actions = max_actions.float().unsqueeze(1)  # convert to float tensor and add an extra dimension, shape: [batch_size, 1]
+            
+
+            # Get Q-value from target critic model for each action that gives max Q-value
+            target_q_value = self.target_critic_model(torch.cat((newstate_tensor, max_actions), dim=1))  # shape: [batch_size, 1]
+
+            # Compute target Q-values for each sample in batch
+            target_q_values = reward_tensor + self.gamma * target_q_value  # shape: [batch_size, 1]
+
 
         # Update critic
         critic_loss = self.loss_fn(q_values, target_q_values)
@@ -508,25 +562,12 @@ class deep_q():
         critic_loss.backward()
         self.optimizer_critic.step()
         self.scheduler_critic.step()  # Update learning rate with scheduler
-
-        # Update actor
-        with torch.no_grad():
-            q_values = []
-            for action in [-1, 0, 1]:
-                action_tensor = torch.tensor([action]*self.batch_size).unsqueeze(1)
-                q_value = self.critic_model(torch.cat((state_tensor, action_tensor), dim=1))
-                q_values.append(q_value.squeeze(-1))
-
-            q_values = torch.stack(q_values, dim=-1)
-
-        action_probs = self.actor_model(state_tensor)
-        actor_loss = -(action_probs * q_values).sum(dim=-1).mean()
-
-        self.optimizer_actor.zero_grad()
-        actor_loss.backward()
-        self.optimizer_actor.step()
-        self.scheduler_actor.step()  # Update learning rate with scheduler
-
+        
+        #update t after one iteration 
+        self.t+=1
+        if self.t % 50 == 0 and self.t!=0:  # Print only every 50 steps
+            print(f"Step: {self.t}, Critic loss: {critic_loss.item()}")
+    
         # update the target model
         self.update_target_model()
     
@@ -543,12 +584,15 @@ class deep_q():
         @return:
         None
         '''
-        # Add the current experience to the replay buffer
-        self.replay_buffer.add((state, action, reward, newstate))
+        if reward != 0:  # Check if reward is not equal to 0
+            # Add the current experience to the replay buffer
+            self.replay_buffer.add((state, action, reward, newstate))
 
-        # Proceed with learning if there are enough experiences in the replay buffer
-        if len(self.replay_buffer.storage) >= self.batch_size:
-            self._learn_from_replay_buffer()
+            # Proceed with learning if there are enough experiences in the replay buffer
+            if len(self.replay_buffer.storage) >= self.replay_buffer_capacity:
+                print('the first',len(self.replay_buffer.storage))
+                self._learn_from_replay_buffer()
+
 
 
         
