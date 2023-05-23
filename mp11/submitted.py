@@ -338,23 +338,15 @@ class deep_q():
         
         #these parameters used for epsilon_gready when acting
         self.t = 0  # Initial timestep
-        self.updates = 100_000  # Total number of updates
-#         self.epsilon_initial = epsilon
-#         self.epsilon_decay = 0.995
-#         self.epsilon_min = 0.05
-#         self.epsilon = self.epsilon_initial
         
         #learning decay
         self.alpha_decay_steps = 10000  # decrease the learning rate every 1000 steps
         self.alpha_decay_rate = 1  # decrease the learning rate by 5% every time
         
-        self.actor_model = self.create_actor_model()
         self.critic_model = self.create_critic_model()
 
-        self.optimizer_actor = torch.optim.Adam(self.actor_model.parameters(), lr=self.alpha)
         self.optimizer_critic = torch.optim.Adam(self.critic_model.parameters(), lr=self.alpha)
         #learning decay
-        self.scheduler_actor = torch.optim.lr_scheduler.StepLR(self.optimizer_actor, step_size=self.alpha_decay_steps, gamma=self.alpha_decay_rate)
         self.scheduler_critic = torch.optim.lr_scheduler.StepLR(self.optimizer_critic, step_size=self.alpha_decay_steps, gamma=self.alpha_decay_rate)
         
         self.loss_fn = nn.MSELoss()
@@ -400,32 +392,10 @@ class deep_q():
         The target model is a separate network which has the same architecture as 
         the original 
         '''
-#         tau = 0.005  # a hyperparameter for how much to update the target model at each step
-#         for target_param, param in zip(self.target_critic_model.parameters(), self.critic_model.parameters()):
-#             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
         if self.t % self.update_frequency == 0:
             # Copy the weights from the main network to the target network
             self.target_critic_model.load_state_dict(self.critic_model.state_dict())
 
-    
-    def create_actor_model(self):
-        '''
-        Create the actor model for the actor-critic algorithm.
-        This model should accept the state as input and output the probability
-        distribution over the actions.
-
-        @return:
-        model (nn.Sequential): A PyTorch model representing the actor network.
-        '''
-        model = nn.Sequential(
-            nn.Linear(5, 128),
-            nn.ReLU(),
-            nn.Linear(128, 32),
-            nn.ReLU(),
-            nn.Linear(32, 3),
-            nn.Softmax(dim=1)
-        )
-        return model
 
     def create_critic_model(self):
         '''
@@ -445,32 +415,6 @@ class deep_q():
         )
         return model
     
-    def update_epsilon(self):
-        '''
-        Update the epsilon (exploration) parameter based on the provided schedule.
-
-        @return epsilon (float): The updated exploration parameter.
-        '''
-
-        start, middle, end = 0, 10_000, self.updates / 2
-        high, medium, low = 1.0, 0.1, 0.01
-
-        if self.t < middle:
-            slope = (medium - high) / (middle - start)
-            epsilon = high + slope * (self.t - start)
-        elif self.t < end:
-            slope = (low - medium) / (end - middle)
-            epsilon = medium + slope * (self.t - middle)
-        else:
-            epsilon = low
-
-#         self.t += 1  # increment the timestep after updating epsilon
-        
-        if self.t % 50 == 0 and self.t!=0:  # Print only every 50 steps
-            print(f"Step: {self.t}, Epsilon updated to: {epsilon}")
-
-        return epsilon
-
     def act(self, state):
         '''
         Decide what action to take in the current state.
@@ -500,9 +444,6 @@ class deep_q():
             action = np.random.choice([-1, 0, 1])
         else:
             action = torch.argmax(q_values_tensor).item() - 1  # to adjust actions back to -1, 0, 1
-
-        # decay epsilon
-        self.update_epsilon()
 
         return action
 
@@ -590,7 +531,7 @@ class deep_q():
 
             # Proceed with learning if there are enough experiences in the replay buffer
             if len(self.replay_buffer.storage) >= self.replay_buffer_capacity:
-                print('the first',len(self.replay_buffer.storage))
+#                 print('the first',len(self.replay_buffer.storage))
                 self._learn_from_replay_buffer()
 
 
